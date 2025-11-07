@@ -1,5 +1,6 @@
 import time
 from collections import deque
+from pathlib import Path
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.so101_follower.config_so101_follower import SO101FollowerConfig
@@ -8,26 +9,37 @@ from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import log_say
 
 
-def replay_episode(hf_username, episode_idx, record_number, port="/dev/ttyACM1"):
+def replay_episode(base_path, record_id, episode_idx, port="/dev/ttyACM1"):
     """
-    Replay a robot episode from a HuggingFace dataset.
+    Replay a robot episode from a local dataset.
     
     Args:
-        hf_username (str): HuggingFace username for dataset location
+        base_path (str): Base path to lerobot datasets directory
+        record_id (int): Record number (1-9)
         episode_idx (int): Episode ID (0-3)
-        record_number (int): Record number (1-9) based on board position
         port (str): Serial port for robot connection
     
     Returns:
         bool: True if replay completed successfully, False otherwise
+    
+    Raises:
+        ValueError: If episode_idx or record_id is not in valid range or dataset_path doesn't exist
+        Exception: If robot connection or dataset loading fails
     """
+    # Validate inputs
+    if not isinstance(record_id, int) or record_id < 1 or record_id > 9:
+        raise ValueError(f"record_id must be an integer between 1 and 9, got {record_id}")
+    
     if not isinstance(episode_idx, int) or episode_idx < 0 or episode_idx > 3:
         raise ValueError(f"episode_idx must be an integer between 0 and 3, got {episode_idx}")
     
-    dataset_repo_id = f"{hf_username}/record{record_number}"
+    # Construct dataset path
+    dataset_path = Path(base_path) / f"record{record_id}"
+    if not dataset_path.exists():
+        raise ValueError(f"Dataset path does not exist: {dataset_path}")
     
-    print(f"\n📁 Loading dataset from: {dataset_repo_id}")
-    print(f"🎬 Episode ID: {episode_idx}, Record: {record_number}")
+    print(f"\n📁 Loading dataset from: {dataset_path}")
+    print(f"🎬 Record ID: {record_id}, Episode ID: {episode_idx}")
     print()
     
     robot = None
@@ -38,19 +50,27 @@ def replay_episode(hf_username, episode_idx, record_number, port="/dev/ttyACM1")
         robot.connect()
         print("✅ Robot connected successfully")
         
-        # Load dataset
-        dataset = LeRobotDataset(dataset_repo_id, episodes=[episode_idx])
-        actions = dataset.hf_dataset.select_columns("action")
+        # Load dataset from local path
+        dataset = LeRobotDataset(
+            repo_id=str(dataset_path),
+            episodes=[episode_idx]
+        )
         
-        print(f"📊 Total frames: {dataset.num_frames}")
+        # Get the episode data - filter by the specific episode_index
+        episode_data = dataset.hf_dataset.filter(lambda x: x['episode_index'] == episode_idx)
+        actions = episode_data.select_columns("action")
+        
+        num_frames = len(episode_data)
+        
+        print(f"📊 Total frames in this episode: {num_frames}")
         print(f"⏱️  FPS: {dataset.fps}")
         print()
         
         # Replay episode
-        log_say(f"Replaying episode {episode_idx} from record {record_number}")
-        print(f"🤖 Starting replay of {dataset.num_frames} frames...\n")
+        log_say(f"Replaying episode {episode_idx} from record {record_id}")
+        print(f"🤖 Starting replay of {num_frames} frames...\n")
         
-        for idx in range(dataset.num_frames):
+        for idx in range(num_frames):
             t0 = time.perf_counter()
             
             action = {
@@ -59,8 +79,9 @@ def replay_episode(hf_username, episode_idx, record_number, port="/dev/ttyACM1")
             }
             robot.send_action(action)
             
+            # Print progress every 10 frames
             if (idx + 1) % 10 == 0:
-                print(f"Frame {idx + 1}/{dataset.num_frames}")
+                print(f"Frame {idx + 1}/{num_frames}")
             
             busy_wait(1.0 / dataset.fps - (time.perf_counter() - t0))
         
@@ -69,6 +90,8 @@ def replay_episode(hf_username, episode_idx, record_number, port="/dev/ttyACM1")
         
     except Exception as e:
         print(f"❌ Error during replay: {e}")
+        import traceback
+        traceback.print_exc()
         return False
     finally:
         if robot is not None:
@@ -80,12 +103,12 @@ def replay_episode(hf_username, episode_idx, record_number, port="/dev/ttyACM1")
 
 
 class RobotTicTacToe:
-    def __init__(self, hf_username, port="/dev/ttyACM1"):
+    def __init__(self, base_path, port="/dev/ttyACM1"):
         """
         Initialize the Robot Tic Tac Toe game.
         
         Args:
-            hf_username (str): HuggingFace username for dataset location
+            base_path (str): Base path to lerobot datasets directory
             port (str): Serial port for robot connection
         """
         # Initialize the board (0 = empty, 1 = player, 2 = computer)
@@ -97,11 +120,15 @@ class RobotTicTacToe:
         self.episode_queue = deque([0, 1, 2, 3])
         
         # Robot parameters
-        self.hf_username = hf_username
+        self.base_path = base_path
         self.port = port
         
         # Track which position the computer played (for recording moves)
         self.computer_moves = []
+        
+        # Validate base path exists
+        if not Path(base_path).exists():
+            raise ValueError(f"Base path does not exist: {base_path}")
         
     def print_board(self):
         """Display the current game board with position tracking"""
@@ -243,7 +270,7 @@ class RobotTicTacToe:
         
         # Replay the episode
         print("\n🔄 Replaying robot movement...\n")
-        success = replay_episode(self.hf_username, episode_idx, record_number, self.port)
+        success = replay_episode(self.base_path, record_number, episode_idx, self.port)
         
         if not success:
             print("⚠️  Robot replay failed, but game continues...\n")
@@ -315,14 +342,31 @@ def main():
     print("Robot Tic Tac Toe Setup")
     print("=" * 60)
     
-    hf_username = input("Enter HuggingFace username: ").strip()
+    base_path = input("Enter base dataset path (default: /home/taksh/lerobot_datasets): ").strip()
+    if not base_path:
+        base_path = "/home/taksh/lerobot_datasets"
+    
+    # Validate base path exists
+    if not Path(base_path).exists():
+        print(f"❌ Error: Base path does not exist: {base_path}")
+        return
+    
     port = input("Enter robot serial port (default: /dev/ttyACM1): ").strip()
     if not port:
         port = "/dev/ttyACM1"
     
     while True:
-        game = RobotTicTacToe(hf_username, port)
-        game.play()
+        try:
+            game = RobotTicTacToe(base_path, port)
+            game.play()
+        except ValueError as e:
+            print(f"❌ Error: {e}")
+            break
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            break
         
         play_again = input("\nDo you want to play again? (yes/no): ").lower().strip()
         if play_again != "yes" and play_again != "y":
